@@ -1,0 +1,45 @@
+---
+ - hosts: linux-servers
+   become: yes
+   become_user: root
+   become_method: su
+
+
+   tasks:
+    - name: Install sudo
+      apt:
+        name: sudo
+        state: present
+
+
+    - name: Add group "ansible" to remote server
+      group:
+        name: ansible
+        state: present
+
+    - name: Add user "ansible" to remote server
+      user:
+        name: ansible
+        password: "{{ ansible_userpass | password_hash('sha512') }}"
+        group: ansible
+        shell: /bin/bash
+        state: present
+        ssh_key_bits: 2048
+        ssh_key_file: .ssh/id_rsa
+
+    - name: Deploy SSH Key
+      authorized_key:
+        user: ansible
+        key: "{{ lookup('file', '/home/ansible/.ssh/id_rsa.pub') }}"
+        state: present
+
+
+    - name: Add ansible user to the sudoers
+      lineinfile:
+        path: /etc/sudoers.d/ansible
+        line: 'ansible ALL=(ALL) NOPASSWD: ALL'
+        state: present
+        mode: 0440
+        create: yes
+
+...
