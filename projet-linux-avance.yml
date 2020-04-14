@@ -1,0 +1,167 @@
+---
+ - hosts: projet-linux-avance
+   become: yes
+   become_method: sudo
+
+#ajouter une ligne pour kill dnsmasq qui ecoute sur 0000 et empeche de creer le bridge
+   tasks:
+    - name: Install needed packages
+      apt:
+        name: lxc,lxc-dev,dnsmasq-base,python,python-pip,gcc
+        state: present
+    - name: Install needed python package
+      pip:
+        name: lxc-python2
+        state: present
+
+    - name: Create a deamon for NAT adn firewall rules iptables
+      blockinfile:
+        path: /etc/systemd/system/iptables.service
+        state: present
+        create: yes
+        block: |
+         [Unit]
+         Description=Configuration d iptables
+         After=network.target
+         [Service]
+         ExecStart=/bin/sh /usr/bin/auto_iptables.sh start
+         ExecStop=/bin/sh /usr/bin/auto_iptables.sh stop
+         Type=oneshot
+         [Install]
+         WantedBy=multi-user.target
+
+    - name: Create the script for iptables
+      blockinfile:
+        path: /usr/bin/auto_iptables.sh
+        state: present
+        create: yes
+        block: |
+         #!/bin/sh
+         case $1 in
+         start|reload )
+         iptables -F
+         iptables -t nat -F
+         iptables -t mangle -F
+         iptables -X
+         #NAT Web to the container
+         iptables -t nat -A PREROUTING -d 10.0.20.3:80 -j DNAT --to-destination 10.0.200.2:80
+         #Allow SSH
+         iptables -t filter -A INPUT -i ens192 -p TCP --dport 22 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+         iptables -t filter -A OUTPUT -p TCP --sport 22 -m conntrack --ctstate ESTABLISHED -j ACCEPT
+         #Allow HTTP
+         iptables -t filter -A INPUT -i ens192 -p TCP --dport 80 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+         iptables -t filter -A OUTPUT -p TCP --sport 80 -m conntrack --ctstate ESTABLISHED -j ACCEPT
+         #Allow FTP (21 used to establish connection, 20 used for data transfer)
+         #Drop all non-matching traffic on ens192
+         iptables -A INPUT -i ens192 -j DROP
+         iptables -A FORWARD -i ens192 -j DROP
+         ;;
+          stop )
+         iptables -F
+         iptables -t nat -F
+         iptables -t mangle -F
+         iptables -X
+         ;;
+          * ) echo "argument must be sart|reload|stop";;
+         esac
+
+    - name: Make auto_iptables.sh executable
+      file: 
+        path: /usr/bin/auto_iptables.sh
+        mode: 755
+
+    - name: Enable and start iptables service
+      service: 
+        name: iptables
+        enabled: yes
+        state: started
+
+    - name: Config of LXC default config for new containers
+      lineinfile:
+        path: /etc/lxc/default.conf
+        line: "{{ item.line }}"
+        regexp: "{{item.regexp}}"
+        state: present
+        create: yes
+      with_items:
+         - { regexp: '^lxc.net.0.type', line: 'lxc.net.0.type = veth' }
+         - { regexp: '^lxc.net.0.link', line: 'lxc.net.0.link = lxcbr0' }
+         - { regexp: '^lxc.net.0.flags', line: 'lxc.net.0.flags = up' }
+         - { regexp: '^lxc.net.0.hwaddr', line: 'lxc.net.0.hwaddr = 00:16:3e:xx:xx:xx' }
+         - { regexp: '^lxc.apparmor.profile', line: 'lxc.apparmor.profile = generated' }
+         - { regexp: '^lxc.apparmor.allow_nesting', line: 'lxc.apparmor.allow_nesting = 1' }
+         - { regexp: '^lxc.start.auto', line: 'lxc.start.auto = 1' }
+
+    - name: Config of LXC default networks conf for new containers
+      lineinfile:
+        path: /etc/default/lxc-net
+        line: "{{ item.line }}"
+        regexp: "{{ item.regexp }}"
+        state: present
+        create: yes
+      with_items:
+         - { regexp: '^USE_LXC_BRIDGE', line: 'USE_LXC_BRIDGE="true"' }
+         - { regexp: '^LXC_ADDR', line: 'LXC_ADDR="10.0.200.1"' }
+         - { regexp: '^LXC_NETWORK', line: 'LXC_NETWORK="10.0.200.0/24"' }
+         - { regexp: '^LXC_DHCP_RANGE', line: 'LXC_DHCP_RANGE="10.0.200.200,10.0.200.205"' }
+         - { regexp: '^LXC_DHCP_CONFILE', line: 'LXC_DHCP_CONFILE=/etc/lxc/dhcp.conf' }
+         - { regexp: '^LXC_DOMAIN', line: 'LXC_DOMAIN="laboppl.home"' }
+
+    - name: Config of our container network int
+      lineinfile:
+        path: /etc/lxc/dhcp.conf
+        line: "dhcp-host=miniwiki,10.0.200.2"
+        regexp: "^dhcp-host"
+        state: present
+        create: yes
+
+
+    - name: Create a started container
+      lxc_container:
+        name: miniwiki
+        container_log: true
+        template: alpine
+        state: started
+        template_options: --release trusty
+
+#nat script iptables
+
+    - name: Run commands within the "running" container
+      lxc_container:
+        name: miniwiki
+        container_command: |
+          apk add apache2 php$phpverx-apache2 php7-common php7-iconv php7-json php7-gd php7-curl php7-xml php7-mysqli php7-imap php7-cgi fcgi php7-pdo php7-pdo_mysql php7-soap php7-xmlrpc php7-posix
+          apk add php7-mcrypt php7-gettext php7-ldap php7-ctype php7-dom php7-session wget mysql mysql-client php-zlib mysql mysql-client phpmyadmin vsftpd
+          rc-update add apache2
+          rc-service apache2 start
+          mysql_install_db --user=mysql --datadir=/var/lib/mysql
+          rc-service mariadb start
+          sed -i "s|.*bind-address\s*=.*|bind-address=127.0.0.1|g" /etc/my.cnf.d/mariadb-server.cnf
+          rc-update add mariadb
+          rc-service mariadb restart
+          printf "{{ securepass }}\n n\n n\n n\n y\n y\n y\n" | mysql_secure_installation
+          chown -R apache:apache /etc/phpmyadmin/
+          chown -R apache:apache /usr/share/webapps/
+          ln -s /usr/share/webapps/phpmyadmin/ /var/www/localhost/htdocs/phpmyadmin
+          rc-service apache2 restart
+          sed -i "s|.*anonymous_enable\s*=.*|anonymous_enable=NO|g" /etc/vsftpd/vsftpd.conf
+          sed -i "s|.*local_enable\s*=.*|local_enable=YES|g" /etc/vsftpd/vsftpd.conf
+          sed -i "s|.*local_umask\s*=.*|local_umask=022|g" /etc/vsftpd/vsftpd.conf
+          sed -i "s|.*write_enable\s*=.*|write_enable=YES|g" /etc/vsftpd/vsftpd.conf
+          sed -i "s|.*ftpd_banner\s*=.*|ftpd_banner=Salut les petit potes|g" /etc/vsftpd/vsftpd.conf
+          sed -i "s|.*connect_from_port_20\s*=.*|connect_from_port_20=NO|g" /etc/vsftpd/vsftpd.conf
+          echo "seccomp_sandbox=NO" >> /etc/vsftpd/vsftpd.conf && "pasv_enable=NO" >> /etc/vsftpd/vsftpd.conf
+          rc-service vsftpd start
+          rc-update add vsftpd
+          cd /usr/share/webapps/
+          wget http://wordpress.org/latest.tar.gz
+          tar -xzvf latest.tar.gz
+          rm latest.tar.gz
+          chown -R apache:apache /usr/share/webapps/
+          ln -s /usr/share/webapps/wordpress/ /var/www/localhost/htdocs/wordpress
+          mysql -u root -p{{ securepass }}
+          CREATE DATABASE wordpress;
+          GRANT ALL PRIVILEGES ON wordpress.* TO 'wordpress'@'localhost' IDENTIFIED BY 'wordpress password';
+          FLUSH PRIVILEGES;
+          EXIT
+...
