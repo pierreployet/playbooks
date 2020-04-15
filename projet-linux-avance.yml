@@ -3,9 +3,15 @@
    become: yes
    become_method: sudo
 
-#ajouter une ligne pour kill dnsmasq qui ecoute sur 0000 et empeche de creer le bridge
+#TO DO
+#- hardening conf ssh (public key only)
+#- iptables
+#- Cacti conf
+#- Munni conf
+#
+
    tasks:
-    - name: Install needed packages
+    - name: Install preconfiguration needed packages
       apt:
         name: lxc,lxc-dev,dnsmasq-base,python,python-pip,gcc
         state: present
@@ -14,7 +20,7 @@
         name: lxc-python2
         state: present
 
-    - name: Create a deamon for NAT adn firewall rules iptables
+    - name: Create a service for NAT and firewall rules iptables
       blockinfile:
         path: /etc/systemd/system/iptables.service
         state: present
@@ -70,13 +76,13 @@
         path: /usr/bin/auto_iptables.sh
         mode: 755
 
-    - name: Enable and start iptables service
+    - name: Enable and start our newly created iptables service
       service: 
         name: iptables
         enabled: yes
         state: stopped
 
-    - name: Delete LXC default config
+    - name: Delete LXC default config before defining our specific one
       file:
         path: /etc/lxc/default.conf
         state: absent
@@ -93,14 +99,14 @@
          lxc.net.0.hwaddr = 00:16:3e:xx:xx:xx
          lxc.start.auto = 1
 
-    - name: Static IP configuration for our container
+    - name: Static IP configuration for our container (defined in a specific file that will be specified in the LXC net conf)
       lineinfile:
         path: /etc/lxc/dnsmasq.conf
         line: "dhcp-host=miniwiki,10.0.200.2"
         state: present
         create: yes
 
-    - name: Config of LXC default networks conf for new containers
+    - name: Config of LXC default network conf (birdge IP, containers network, DHCP range and specific static binds) 
       blockinfile:
         path: /etc/default/lxc-net
         state: present
@@ -112,12 +118,12 @@
          LXC_NETWORK="10.0.200.0/24"
          LXC_DHCP_RANGE="10.0.200.200,10.0.200.205"
 
-    - name: Restart lxc-net
+    - name: Restart lxc-net after the modifications that have been done
       service:
         name: lxc-net
         state: restarted
 
-    - name: Create a started container
+    - name: Create an alpine started container with logging enabled
       lxc_container:
         name: miniwiki
         template: alpine
@@ -126,10 +132,10 @@
 
 
 
-    - name: Install bash on container for container_command
+    - name: Install bash on container for container_command because all commands run with container_command is executed with bash
       shell: lxc-attach miniwiki -- apk add bash
 
-    - name: Now that bash is installed, install all the packages
+    - name: Now that bash is installed, install all the packages (because all commands run with container_command is executed with bash)
       lxc_container:
         name: miniwiki
         container_command: |
@@ -163,7 +169,7 @@
           chown -R apache:apache /usr/share/webapps/
           ln -s /usr/share/webapps/wordpress/ /var/www/localhost/htdocs/wordpress
           mysql -uroot -e "CREATE DATABASE wordpress;"
-          mysql -u root -e "GRANT ALL PRIVILEGES ON wordpress.* TO 'wordpress'@'localhost' IDENTIFIED BY 'wordpress password';"
+          mysql -u root -e "GRANT ALL PRIVILEGES ON wordpress.* TO 'wordpress'@'localhost' IDENTIFIED BY '"{{ wordpressdbpass }}"';"
           mysql -u root -e "FLUSH PRIVILEGES;"
 
     - name: Create MOTD banner file
@@ -189,6 +195,4 @@
       systemd:
        name: sshd
        state: reloaded
-
-
 ...
