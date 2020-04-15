@@ -74,59 +74,62 @@
       service: 
         name: iptables
         enabled: yes
-        state: started
+        state: stopped
+
+    - name: Delete LXC default config
+      file:
+        path: /etc/lxc/default.conf
+        state: absent
 
     - name: Config of LXC default config for new containers
-      lineinfile:
+      blockinfile:
         path: /etc/lxc/default.conf
-        line: "{{ item.line }}"
-        regexp: "{{item.regexp}}"
         state: present
         create: yes
-      with_items:
-         - { regexp: '^lxc.net.0.type', line: 'lxc.net.0.type = veth' }
-         - { regexp: '^lxc.net.0.link', line: 'lxc.net.0.link = lxcbr0' }
-         - { regexp: '^lxc.net.0.flags', line: 'lxc.net.0.flags = up' }
-         - { regexp: '^lxc.net.0.hwaddr', line: 'lxc.net.0.hwaddr = 00:16:3e:xx:xx:xx' }
-         - { regexp: '^lxc.apparmor.profile', line: 'lxc.apparmor.profile = generated' }
-         - { regexp: '^lxc.apparmor.allow_nesting', line: 'lxc.apparmor.allow_nesting = 1' }
-         - { regexp: '^lxc.start.auto', line: 'lxc.start.auto = 1' }
+        block: |
+         lxc.net.0.type = veth
+         lxc.net.0.link = lxcbr0
+         lxc.net.0.flags = up
+         lxc.net.0.hwaddr = 00:16:3e:xx:xx:xx
+         lxc.start.auto = 1
+
+    - name: Static IP configuration for our container
+      lineinfile:
+        path: /etc/lxc/dnsmasq.conf
+        line: "dhcp-host=miniwiki,10.0.200.2"
+        state: present
+        create: yes
 
     - name: Config of LXC default networks conf for new containers
-      lineinfile:
+      blockinfile:
         path: /etc/default/lxc-net
-        line: "{{ item.line }}"
-        regexp: "{{ item.regexp }}"
         state: present
         create: yes
-      with_items:
-         - { regexp: '^USE_LXC_BRIDGE', line: 'USE_LXC_BRIDGE="true"' }
-         - { regexp: '^LXC_ADDR', line: 'LXC_ADDR="10.0.200.1"' }
-         - { regexp: '^LXC_NETWORK', line: 'LXC_NETWORK="10.0.200.0/24"' }
-         - { regexp: '^LXC_DHCP_RANGE', line: 'LXC_DHCP_RANGE="10.0.200.200,10.0.200.205"' }
-         - { regexp: '^LXC_DHCP_CONFILE', line: 'LXC_DHCP_CONFILE=/etc/lxc/dhcp.conf' }
-         - { regexp: '^LXC_DOMAIN', line: 'LXC_DOMAIN="laboppl.home"' }
+        block: |
+         USE_LXC_BRIDGE="true"
+         LXC_ADDR="10.0.200.1"
+         LXC_DHCP_CONFILE=/etc/lxc/dnsmasq.conf
+         LXC_NETWORK="10.0.200.0/24"
+         LXC_DHCP_RANGE="10.0.200.200,10.0.200.205"
 
-    - name: Config of our container network int
-      lineinfile:
-        path: /etc/lxc/dhcp.conf
-        line: "dhcp-host=miniwiki,10.0.200.2"
-        regexp: "^dhcp-host"
-        state: present
-        create: yes
-
+    - name: Restart lxc-net
+      service:
+        name: lxc-net
+        state: restarted
 
     - name: Create a started container
       lxc_container:
         name: miniwiki
-        container_log: true
         template: alpine
+        container_log: true
         state: started
-        template_options: --release trusty
 
-#nat script iptables
 
-    - name: Run commands within the "running" container
+
+    - name: Install bash on container for container_command
+      shell: lxc-attach miniwiki -- apk add bash
+
+    - name: Now that bash is installed, install all the packages
       lxc_container:
         name: miniwiki
         container_command: |
@@ -159,9 +162,33 @@
           rm latest.tar.gz
           chown -R apache:apache /usr/share/webapps/
           ln -s /usr/share/webapps/wordpress/ /var/www/localhost/htdocs/wordpress
-          mysql -u root -p{{ securepass }}
-          CREATE DATABASE wordpress;
-          GRANT ALL PRIVILEGES ON wordpress.* TO 'wordpress'@'localhost' IDENTIFIED BY 'wordpress password';
-          FLUSH PRIVILEGES;
-          EXIT
+          mysql -uroot -e "CREATE DATABASE wordpress;"
+          mysql -u root -e "GRANT ALL PRIVILEGES ON wordpress.* TO 'wordpress'@'localhost' IDENTIFIED BY 'wordpress password';"
+          mysql -u root -e "FLUSH PRIVILEGES;"
+
+    - name: Create MOTD banner file
+      blockinfile:
+        path: /etc/MOTD.laboppl
+        state: present
+        create: yes
+        block: |
+         ################################################################
+         #          PROJET LINUX AVANCE - Authorized user only          #
+         #               all your actions are recorded                  #
+         ################################################################ 
+
+
+    - name: Configure MOTD banner
+      replace:
+       path: /etc/ssh/sshd_config
+       regexp: '^(.*)(Banner)(.*)$'
+       replace: 'Banner /etc/MOTD.laboppl'
+       backup: yes
+
+    - name: Restart sshd
+      systemd:
+       name: sshd
+       state: reloaded
+
+
 ...
