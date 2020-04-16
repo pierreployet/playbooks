@@ -11,14 +11,59 @@
 #
 
    tasks:
+    - name: In case of already created and running iptables rules it will stop it
+      systemd:
+        name: iptables-fw
+        state: stopped
+
     - name: Install preconfiguration needed packages
       apt:
-        name: lxc,lxc-dev,dnsmasq-base,python,python-pip,gcc,nagios-nrpe-server,sysstat,monitoring-plugins-standard,monitoring-plugins-common,monitoring-plugins-basic,monitoring-plugins,sysstat,libarray-unique-perl,libarray-unique-perl,libfile-slurp-unicode-perl,liblist-moreutils-perl,libtemplate-plugin-number-format-perl,libreadonly-xs-perl,nagios-plugins-contrib,bc
+        name: lxc,lxc-dev,dnsmasq-base,python,python-pip,gcc,nagios-nrpe-server,sysstat,monitoring-plugins-standard,monitoring-plugins-common,monitoring-plugins-basic,monitoring-plugins,sysstat,libarray-unique-perl,libarray-unique-perl,libfile-slurp-unicode-perl,liblist-moreutils-perl,libtemplate-plugin-number-format-perl,libreadonly-xs-perl,nagios-plugins-contrib,bc,munin,apache2,git,mariadb-server,mariadb-client,libapache2-mod-php,php-xml,php-ldap,php-mbstring,php-gd,php-gmp,php-mysql
         state: present
+
     - name: Install needed python package
       pip:
         name: lxc-python2
         state: present
+
+    - name: Add configuration lines to munin.conf
+      blockinfile:
+        path: /etc/munin/munin.conf
+        state: present
+        insertafter: EOF
+        block: |
+          [wordpress.localdomain]
+              address 10.0.10.2"
+              use_node_name yes
+
+    - name: Change apache2 config for munin
+      replace:
+        path: /etc/apache2/ports.conf
+        regexp: '.*Listen 80$'
+        replace: 'Listen 8080'
+
+    - name: Start apache2 service
+      systemd:
+        name: apache2
+        state: started
+
+
+    - name: Create a symlink for munin
+      file:
+        src: /var/cache/munin/www/
+        dest: /var/www/html/munin-interface
+        state: link
+
+
+    - name: Restart munin service
+      systemd:
+        name: munin
+        state: restarted
+
+    - name: Add bootstrap theme
+      git:
+        repo: 'https://github.com/munin-monitoring/contrib.git'
+        dest: /tmp/munin
 
     - name: Add my supervision server to the allowed hosts
       lineinfile:
@@ -46,10 +91,37 @@
 
     - name: Download nagios needed pluggin
       get_url:
-        url: http://example.com/path/file.conf
-        dest: /etc/foo.conf
-        force_basic_auth: yes
+        url: https://github.com/pierreployet/infra/raw/master/plugins.tgz
+        dest: /tmp/plugins.tgz
 
+    - name: Extract the plugins to /usr/lib/nagios/plugins/
+      unarchive:
+        src: /tmp/plugins.tgz
+        dest: /usr/lib/nagios/plugins/
+        remote_src: yes
+
+    - name: Remove the unneeded archive
+      file:
+        path: /tmp/plugins.tgz
+        state: absent
+
+    - name: Change files permissions for the customs supervision scripts
+      file:
+        path: "{{ item }}"
+        mode: '0755'
+      with_items:
+        - /usr/lib/nagios/plugins/check_cpu.sh
+        - /usr/lib/nagios/plugins/check_diskio
+        - /usr/lib/nagios/plugins/check_forkrate.sh
+        - /usr/lib/nagios/plugins/check_memory
+        - /usr/lib/nagios/plugins/check_mrths_traffic.pl
+        - /usr/lib/nagios/plugins/check_swap_paging_rate.sh
+
+    - name: Restart nagios nrpe
+      systemd:
+        name: nagios-nrpe-server
+        enabled: yes
+        state: restarted
 
     - name: Create a service for NAT and firewall rules iptables
       blockinfile:
@@ -90,15 +162,17 @@
          # Accept traffic on localhost
          iptables -A INPUT -i lo -j ACCEPT
          iptables -A OUTPUT -o lo -j ACCEPT
+         #Allow DNS resolution
+         iptables -A OUTPUT -p udp --dport 53 -j ACCEPT 
          #Add SSH
          iptables -A INPUT -p tcp --dport 22 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
          #Add FTP
          iptables -A INPUT -p tcp --dport 21 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
          #Add Munin & Cacti
-         iptables -A INPUT -p tcp --dport 8000 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+         iptables -A INPUT -p tcp --dport 8080 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
          #Add Forwarding to Web Server
          iptables -A INPUT -i lxcbr0 -j ACCEPT
-         iptables -A FORWARD -i lxcbr0 -o ens33 -j ACCEPT
+         iptables -A FORWARD -i lxcbr0 -o ens192 -j ACCEPT
          iptables -A FORWARD -i ens192 -o lxcbr0 -j ACCEPT
          iptables -A INPUT -p tcp --dport 80 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
          #Toutes les connexions déjà établies ont l'autorisation de sortir
@@ -178,7 +252,7 @@
         name: miniwiki
         container_command: |
           apk add apache2 php$phpverx-apache2 php7-common php7-iconv php7-json php7-gd php7-curl php7-xml php7-mysqli php7-imap php7-cgi fcgi php7-pdo php7-pdo_mysql php7-soap php7-xmlrpc php7-posix
-          apk add php7-mcrypt php7-gettext php7-ldap php7-ctype php7-dom php7-session wget mysql mysql-client php-zlib mysql mysql-client phpmyadmin vsftpd php-phar
+          apk add php7-mcrypt php7-gettext php7-ldap php7-ctype php7-dom php7-session wget mysql mysql-client php-zlib mysql mysql-client phpmyadmin vsftpd php-phar nano munin-node
           rc-update add apache2
           rc-service apache2 start
           mysql_install_db --user=mysql --datadir=/var/lib/mysql
@@ -216,13 +290,28 @@
           wp core install --url="10.0.20.3/wordpress" --title="MiniWiki" --admin_user="{{ adminuserWP }}" --admin_password="{{ adminpassWP }}" --admin_email="{{ adminmailWP }}" --allow-root
           chown -R apache:apache /usr/share/webapps/
           ln -s /usr/share/webapps/wordpress/ /var/www/localhost/htdocs/wordpress
-
-
+          echo -e "<Directory "/var/www/localhost/htdocs">\nRewriteEngine on\nRewriteCond %{REQUEST_URI} !^/wordpress\nRewriteRule (.*) /wordpress/$1 [QSA,L]\n</Directory>" >> /etc/apache2/conf.d/rewrite-wordpress-url.conf
           sed -i 's/ServerTokens OS/ServerTokens Prod/g' /etc/apache2/httpd.conf
           sed -i 's/ServerSignature On/ServerSignature Off/g' /etc/apache2/httpd.conf
           sed -i 's/disable_functions =/disable_functions = show_source, system, shell_exec, passthru, phpinfo, proc_open, proc_nice/g' /etc/php7/php.ini 
           sed -i 's/display_errors = On/display_errors = Off/g' /etc/php7/php.ini 
           sed -i "s|.*expose_php\s*=.*|expose_php = Off|g" /etc/php7/php.ini 
+          echo "allow ^10\.0\.10\.1$">>/etc/munin/munin-node.conf
+          ln -sf /usr/lib/munin/plugins/cpu /etc/munin/plugins/cpu
+          ln -sf /usr/lib/munin/plugins/diskstats /etc/munin/plugins/diskstats
+          ln -sf /usr/lib/munin/plugins/fw_packets /etc/munin/plugins/fw_packets
+          ln -sf /usr/lib/munin/plugins/if_err_ /etc/munin/plugins/if_err_eth0
+          ln -sf /usr/lib/munin/plugins/if_ /etc/munin/plugins/if_eth0
+          ln -sf /usr/lib/munin/plugins/load /etc/munin/plugins/load
+          ln -sf /usr/lib/munin/plugins/memory /etc/munin/plugins/memory
+          ln -sf /usr/lib/munin/plugins/munin_stats /etc/munin/plugins/munin_stats
+          ln -sf /usr/lib/munin/plugins/processes /etc/munin/plugins/processes
+          ln -sf /usr/lib/munin/plugins/uptime /etc/munin/plugins/uptime
+          ln -sf /usr/lib/munin/plugins/users /etc/munin/plugins/users
+          ln -sf /usr/lib/munin/plugins/threads /etc/munin/plugins/threads
+          ln -sf /usr/lib/munin/plugins/swap /etc/munin/plugins/swap
+          rc-update add munin-node
+          rc-service munin-node start
 
     - name: Create MOTD banner file
       blockinfile:
@@ -285,8 +374,33 @@
 
 
  - hosts: "10.0.10.3"
+   become: yes
+   become_method: sudo
 
+   vars_prompt:
+    - name: hostdescription
+      prompt: "Please enter the host description following the naming convention 'city - APP'"
+      private: no
 
-   -name: Add conf 
+    - name: hostip
+      prompt: please enter the host ip to supervise
+      private: no
 
+   tasks: 
+
+    - name: Add the conf for the new host to the supervision server
+      blockinfile:
+        path: /etc/icinga2/conf.d/linux_hosts.conf
+        state: present
+        block: |
+         object Host "{{ hostdescription }}" {
+          import "generic-host"
+          address = "{{ hostip }}"
+          vars.os = "Linux"
+         }
+
+    - name: Reload icinga2 service
+      systemd:
+        name: icinga2
+        state: restarted
 ...
