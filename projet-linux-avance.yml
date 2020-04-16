@@ -271,7 +271,7 @@
           sed -i "s|.*write_enable\s*=.*|write_enable=YES|g" /etc/vsftpd/vsftpd.conf
           sed -i "s|.*ftpd_banner\s*=.*|ftpd_banner=Bienvenu sur notre serveur|g" /etc/vsftpd/vsftpd.conf
           sed -i "s|.*connect_from_port_20\s*=.*|connect_from_port_20=NO|g" /etc/vsftpd/vsftpd.conf
-          echo "seccomp_sandbox=NO" >> /etc/vsftpd/vsftpd.conf && "pasv_enable=NO" >> /etc/vsftpd/vsftpd.conf
+          echo "seccomp_sandbox=NO" >> /etc/vsftpd/vsftpd.conf && echo "pasv_enable=NO" >> /etc/vsftpd/vsftpd.conf
           rc-service vsftpd start
           rc-update add vsftpd
           mysql -uroot -e "CREATE DATABASE secret_db_wordpress;"
