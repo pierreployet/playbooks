@@ -13,12 +13,43 @@
    tasks:
     - name: Install preconfiguration needed packages
       apt:
-        name: lxc,lxc-dev,dnsmasq-base,python,python-pip,gcc
+        name: lxc,lxc-dev,dnsmasq-base,python,python-pip,gcc,nagios-nrpe-server,sysstat,monitoring-plugins-standard,monitoring-plugins-common,monitoring-plugins-basic,monitoring-plugins,sysstat,libarray-unique-perl,libarray-unique-perl,libfile-slurp-unicode-perl,liblist-moreutils-perl,libtemplate-plugin-number-format-perl,libreadonly-xs-perl,nagios-plugins-contrib,bc
         state: present
     - name: Install needed python package
       pip:
         name: lxc-python2
         state: present
+
+    - name: Add my supervision server to the allowed hosts
+      lineinfile:
+        path: /etc/nagios/nrpe.cfg
+        state: present
+        regexp: '^allowed_hosts'
+        line: 'allowed_hosts=127.0.0.1,::1,10.0.10.3'
+
+    - name: Add check to icinga conf
+      blockinfile:
+        path: /etc/nagios/nrpe.d/icinga.cfg
+        state: present
+        create: yes
+        block: |
+
+         command[check_diskio]=/usr/lib/nagios/plugins/check_diskio -d /dev/sda --factor=Mi --uom=bytes --warning=50 --critical=100
+         command[check_cpu]=/usr/lib/nagios/plugins/check_cpu.sh -w 80 -c 95
+         command[check_forkrate]=/usr/lib/nagios/plugins/check_forkrate.sh --warn=100 --critical=200
+         command[check_disk]=/usr/lib/nagios/plugins/check_disk -w 20% -c 10% -u MB -X proc -X sysfs -X tmpfs -X devpts -X nfs -X fuse --exclude-type=tracefs
+         command[check_swap_paging_rate]=/usr/lib/nagios/plugins/check_swap_paging_rate.sh --warn=5 --critical=10
+         command[check_bandwidth]=/usr/lib/nagios/plugins/check_mrths_traffic.pl -i ens192
+         command[check_memory]=/usr/lib/nagios/plugins/check_memory -w 80 -c 90
+         command[check_load]=/usr/lib/nagios/plugins/check_load -w 2.00,2.25,2.50 -c 3.00,3.25,3.50
+         command[check_apt]=/usr/lib/nagios/plugins/check_apt
+
+    - name: Download nagios needed pluggin
+      get_url:
+        url: http://example.com/path/file.conf
+        dest: /etc/foo.conf
+        force_basic_auth: yes
+
 
     - name: Create a service for NAT and firewall rules iptables
       blockinfile:
@@ -147,7 +178,7 @@
         name: miniwiki
         container_command: |
           apk add apache2 php$phpverx-apache2 php7-common php7-iconv php7-json php7-gd php7-curl php7-xml php7-mysqli php7-imap php7-cgi fcgi php7-pdo php7-pdo_mysql php7-soap php7-xmlrpc php7-posix
-          apk add php7-mcrypt php7-gettext php7-ldap php7-ctype php7-dom php7-session wget mysql mysql-client php-zlib mysql mysql-client phpmyadmin vsftpd
+          apk add php7-mcrypt php7-gettext php7-ldap php7-ctype php7-dom php7-session wget mysql mysql-client php-zlib mysql mysql-client phpmyadmin vsftpd php-phar
           rc-update add apache2
           rc-service apache2 start
           mysql_install_db --user=mysql --datadir=/var/lib/mysql
@@ -164,25 +195,34 @@
           sed -i "s|.*local_enable\s*=.*|local_enable=YES|g" /etc/vsftpd/vsftpd.conf
           sed -i "s|.*local_umask\s*=.*|local_umask=022|g" /etc/vsftpd/vsftpd.conf
           sed -i "s|.*write_enable\s*=.*|write_enable=YES|g" /etc/vsftpd/vsftpd.conf
-          sed -i "s|.*ftpd_banner\s*=.*|ftpd_banner=Salut les petit potes|g" /etc/vsftpd/vsftpd.conf
+          sed -i "s|.*ftpd_banner\s*=.*|ftpd_banner=Bienvenu sur notre serveur|g" /etc/vsftpd/vsftpd.conf
           sed -i "s|.*connect_from_port_20\s*=.*|connect_from_port_20=NO|g" /etc/vsftpd/vsftpd.conf
           echo "seccomp_sandbox=NO" >> /etc/vsftpd/vsftpd.conf && "pasv_enable=NO" >> /etc/vsftpd/vsftpd.conf
           rc-service vsftpd start
           rc-update add vsftpd
-          cd /usr/share/webapps/
-          wget http://wordpress.org/latest.tar.gz
-          tar -xzvf latest.tar.gz
-          rm latest.tar.gz
+          mysql -uroot -e "CREATE DATABASE secret_db_wordpress;"
+          mysql -u root -e "GRANT ALL PRIVILEGES ON secret_db_wordpress.* TO 'wordpress'@'localhost' IDENTIFIED BY '"{{ wordpressdbpass }}"';"
+          mysql -u root -e "FLUSH PRIVILEGES;"
+          cd /tmp
+          wget https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+          chmod +x wp-cli.phar
+          php wp-cli.phar --info
+          mv wp-cli.phar /usr/local/bin/wp
+          # Création de la BDD pour Wordpress
+          # Installation de Wordpress
+          mkdir /usr/share/webapps/wordpress && cd /usr/share/webapps/wordpress
+          wp core download --allow-root
+          wp core config --dbname="secret_db_wordpress" --dbuser="wordpress" --dbpass="{{ wordpressdbpass }}" --dbhost="localhost" --dbprefix="miniwiki_wp_" --allow-root
+          wp core install --url="10.0.20.3/wordpress" --title="MiniWiki" --admin_user="{{ adminuserWP }}" --admin_password="{{ adminpassWP }}" --admin_email="{{ adminmailWP }}" --allow-root
           chown -R apache:apache /usr/share/webapps/
           ln -s /usr/share/webapps/wordpress/ /var/www/localhost/htdocs/wordpress
+
+
           sed -i 's/ServerTokens OS/ServerTokens Prod/g' /etc/apache2/httpd.conf
           sed -i 's/ServerSignature On/ServerSignature Off/g' /etc/apache2/httpd.conf
           sed -i 's/disable_functions =/disable_functions = show_source, system, shell_exec, passthru, phpinfo, proc_open, proc_nice/g' /etc/php7/php.ini 
           sed -i 's/display_errors = On/display_errors = Off/g' /etc/php7/php.ini 
           sed -i "s|.*expose_php\s*=.*|expose_php = Off|g" /etc/php7/php.ini 
-          mysql -uroot -e "CREATE DATABASE wordpress;"
-          mysql -u root -e "GRANT ALL PRIVILEGES ON wordpress.* TO 'wordpress'@'localhost' IDENTIFIED BY '"{{ wordpressdbpass }}"';"
-          mysql -u root -e "FLUSH PRIVILEGES;"
 
     - name: Create MOTD banner file
       blockinfile:
@@ -242,5 +282,11 @@
       systemd:
        name: sshd
        state: reloaded
+
+
+ - hosts: "10.0.10.3"
+
+
+   -name: Add conf 
 
 ...
