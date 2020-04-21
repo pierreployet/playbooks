@@ -47,6 +47,7 @@
         gateway: "{{ gateway }}"
         type: static
         dns_servers: 10.0.10.1
+        mac: "{{ '00:50:06' | random_mac }}"
       customization:
         hostname: "{{ vm_hostname }}"
       state: poweredon
