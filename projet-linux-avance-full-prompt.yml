@@ -1,0 +1,390 @@
+---
+ - hosts: localhost
+   gather_facts: no
+   vars_prompt:
+   - name: target_host
+     prompt: please enter the target host IP
+     private: no
+
+   tasks:
+     - add_host:
+         name: "{{ target_host }}"
+         groups: dynamically_created_hosts
+
+
+ - hosts: dynamically_created_hosts
+   become: yes
+   become_method: su
+
+   vars_prompt:
+
+    - name: path_to_pub_key
+      prompt: "please enter the path to the public key to add to the known host on the remote host. Note: after running this playbook, only public key authentication will be allowed, if you do not have a keypair matching the remote user locally please cancel this playbook and do the following : Create a user matching the remote user and generate a rsa keypair using ssh-keygen -t rsa. Path example: /home/myuser/.ssh/id_rsa.pub"
+      private: no
+      confirm: yes
+
+    - name: securepass
+      prompt: please enter a new mysql root password for the container
+      private: yes
+      confirm: yes
+
+    - name: wordpressdbpass
+      prompt: pleaser enter a new pass for wordpress db user
+      private: yes
+      confirm: yes
+
+    - name: adminuserWP
+      prompt: please enter the wordpress admin user to create
+      private: no
+      confirm: yes
+
+    - name: adminpassWP
+      prompt: please enter the password for the wordpress admin user
+      private: yes
+      confirm: yes
+
+    - name: adminmailWP
+      prompt: please enter the mail for the wordpress admin user
+      private: no
+
+
+   tasks:
+    - name: test
+      shell: touch /tmp/bite
+
+
+    - name: In case of already created and running iptables rules it will stop it
+      shell:  test -f /etc/systemd/system/iptables-fw.service && sudo systemctl stop iptables-fw.service || echo file or direcotry does not exist
+
+    - name: Install preconfiguration needed packages
+      apt:
+        name: sudo,lxc,lxc-dev,dnsmasq-base,python,python-pip,gcc,nagios-nrpe-server,sysstat,monitoring-plugins-standard,monitoring-plugins-common,monitoring-plugins-basic,monitoring-plugins,sysstat,libarray-unique-perl,libarray-unique-perl,libfile-slurp-unicode-perl,liblist-moreutils-perl,libtemplate-plugin-number-format-perl,libreadonly-xs-perl,nagios-plugins-contrib,bc,munin,apache2,git,mariadb-server,mariadb-client,libapache2-mod-php,php-xml,php-ldap,php-mbstring,php-gd,php-gmp,php-mysql,cacti,net-tools
+        state: present
+
+    - name: Install needed python package
+      pip:
+        name: lxc-python2
+        state: present
+
+    - name: Change mod for Cacti dir
+      file:
+       state: directory
+       recurse: yes
+       path: /usr/share/cacti/
+       mode: '0777'
+
+    - name: Force refresh
+      shell: php -q /usr/share/cacti/site/poller.php --force
+
+    - name: Add configuration lines to munin.conf
+      blockinfile:
+        path: /etc/munin/munin.conf
+        state: present
+        insertafter: EOF
+        block: |
+          [wordpress.localdomain]
+              address 10.0.200.2"
+              use_node_name yes
+
+
+    - name: Change apache2 config for munin
+      replace:
+        path: /etc/apache2/ports.conf
+        regexp: '.*Listen 80$'
+        replace: 'Listen 8080'
+
+    - name: Start apache2 service
+      systemd:
+        name: apache2
+        state: restarted
+
+
+    - name: Create a symlink for munin
+      file:
+        src: /var/cache/munin/www/
+        dest: /var/www/html/munin-interface
+        state: link
+
+
+    - name: Restart munin service
+      systemd:
+        name: munin
+        state: restarted
+
+    - name: Add bootstrap theme
+      git:
+        repo: 'https://github.com/munin-monitoring/contrib.git'
+        dest: /etc/munin/contrib
+
+    - name: Backup original conf
+      shell: 
+        test -d /etc/munin/static && sudo mv /etc/munin/static /etc/munin/static.orig || echo file or directory does not exist
+        test -d /etc/munin/templates && sudo mv /etc/munin/templates /etc/munin/templates.orig || echo file or directory does not exist
+
+    - name: Copy munin new theme
+      shell: |
+        cp -r /etc/munin/contrib/templates/munstrap/static /etc/munin/ 2> /dev/null
+        cp -r /etc/munin/contrib/templates/munstrap/templates /etc/munin/ 2> /dev/null
+
+
+    - name: Create a service for NAT and firewall rules iptables
+      blockinfile:
+        path: /etc/systemd/system/iptables-fw.service
+        state: present
+        create: yes
+        block: |
+         [Unit]
+         Description=Configuration d iptables
+         After=network.target
+         [Service]
+         ExecStart=/bin/sh /usr/bin/auto_iptables.sh start
+         RemainAfterExit=true
+         ExecStop=/bin/sh /usr/bin/auto_iptables.sh stop
+         StandardOutput=journal
+         Type=oneshot
+         [Install]
+         WantedBy=multi-user.target
+
+
+    - name: Provisionning of the script
+      blockinfile:
+        path: /usr/bin/auto_iptables.sh
+        state: present
+        create: yes
+        block: |
+         #!/bin/sh
+         case $1 in
+         start|reload )
+         iptables -F
+         iptables -t nat -F
+         iptables -t mangle -F
+         iptables -X
+         #DROP everything
+         iptables -P INPUT DROP
+         iptables -P FORWARD DROP
+         iptables -P OUTPUT DROP
+         # Accept traffic on localhost
+         iptables -A INPUT -i lo -j ACCEPT
+         iptables -A OUTPUT -o lo -j ACCEPT
+         #Needed to pass traffic from container using masquerade
+         iptables -t nat -A POSTROUTING -s 10.0.200.0/24 -o ens192 -j MASQUERADE
+         iptables -t nat -A PREROUTING -j DNAT -i ens192 -p tcp --dport 80 --to-destination 10.0.200.2:80
+         #Allow all in 10.0.200.0/24 subnet
+         iptables -A INPUT -s 10.0.200.0/24 -d 10.0.200.0/24 -j ACCEPT
+         iptables -A OUTPUT -s 10.0.200.0/24 -d 10.0.200.0/24 -j ACCEPT
+         #Allow NRPE traffic for my supervision server
+         iptables -A INPUT -p tcp --dport 5666 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+         iptables -A OUTPUT -p tcp --sport 5666 -m conntrack --ctstate ESTABLISHED -j ACCEPT
+         #Allow DNS resolution
+         iptables -A OUTPUT -p udp --dport 53 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT 
+         iptables -A INPUT -p udp --sport 53 -m conntrack --ctstate ESTABLISHED -j ACCEPT
+         #Add SSH
+         iptables -A INPUT -p tcp --dport 22 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+         iptables -A OUTPUT -p tcp --sport 22 -m conntrack --ctstate ESTABLISHED -j ACCEPT
+         #Add FTP
+         iptables -A INPUT -p tcp --dport 21 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+         iptables -A OUTPUT -p tcp --sport 21 -m conntrack --ctstate ESTABLISHED -j ACCEPT
+         #Add Munin & Cacti
+         iptables -A INPUT -p tcp --dport 8080 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+         iptables -A OUTPUT -p tcp --sport 8080 -m conntrack --ctstate ESTABLISHED -j ACCEPT
+         #Add Forwarding to Web Server
+         iptables -A INPUT -i lxcbr0 -j ACCEPT
+         iptables -A FORWARD -i lxcbr0 -o ens192 -j ACCEPT
+         iptables -A FORWARD -i ens192 -o lxcbr0 -j ACCEPT
+         iptables -A INPUT -p tcp --dport 80 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+         iptables -A OUTPUT -p tcp --sport 80 -m conntrack --ctstate ESTABLISHED -j ACCEPT
+         iptables -A OUTPUT -p tcp --dport 80 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+         iptables -A INPUT -p tcp --sport 80 -m conntrack --ctstate ESTABLISHED -j ACCEPT
+         ;;
+          stop )
+         iptables -F
+         iptables -t nat -F
+         iptables -t mangle -F
+         iptables -X
+         iptables -t nat -A POSTROUTING -s 10.0.200.0/24 -o ens192 -j MASQUERADE
+         iptables -P INPUT ACCEPT
+         iptables -P FORWARD ACCEPT
+         iptables -P OUTPUT ACCEPT
+         ;;
+          * ) echo "argument must be sart|reload|stop";;
+         esac
+
+    - name: Make auto_iptables.sh executable
+      file: 
+        path: /usr/bin/auto_iptables.sh
+        mode: 755
+
+    - name: Delete LXC default config before defining our specific one
+      file:
+        path: /etc/lxc/default.conf
+        state: absent
+
+    - name: Config of LXC default config for new containers
+      blockinfile:
+        path: /etc/lxc/default.conf
+        state: present
+        create: yes
+        block: |
+         lxc.net.0.type = veth
+         lxc.net.0.link = lxcbr0
+         lxc.net.0.flags = up
+         lxc.net.0.hwaddr = 00:16:3e:xx:xx:xx
+         lxc.start.auto = 1
+
+    - name: Static IP configuration for our container (defined in a specific file that will be specified in the LXC net conf)
+      lineinfile:
+        path: /etc/lxc/dnsmasq.conf
+        line: "dhcp-host=miniwiki,10.0.200.2"
+        state: present
+        create: yes
+
+    - name: Config of LXC default network conf (birdge IP, containers network, DHCP range and specific static binds) 
+      blockinfile:
+        path: /etc/default/lxc-net
+        state: present
+        create: yes
+        block: |
+         USE_LXC_BRIDGE="true"
+         LXC_ADDR="10.0.200.1"
+         LXC_DHCP_CONFILE=/etc/lxc/dnsmasq.conf
+         LXC_NETWORK="10.0.200.0/24"
+         LXC_DHCP_RANGE="10.0.200.200,10.0.200.205"
+
+    - name: Restart lxc-net after the modifications that have been done
+      service:
+        name: lxc-net
+        state: restarted
+
+    - name: Create an alpine started container with logging enabled
+      lxc_container:
+        name: miniwiki
+        template: alpine
+        container_log: true
+        state: started
+
+
+    - name: Install bash on container for container_command because all commands run with container_command is executed with bash
+      shell: lxc-attach miniwiki -- apk add bash
+
+    - name: Now that bash is installed, install all the packages (because all commands run with container_command is executed with bash)
+      lxc_container:
+        name: miniwiki
+        container_command: |
+          apk add apache2 php$phpverx-apache2 php7-common php7-iconv php7-json php7-gd php7-curl php7-xml php7-mysqli php7-imap php7-cgi fcgi php7-pdo php7-pdo_mysql php7-soap php7-xmlrpc php7-posix
+          apk add php7-mcrypt php7-gettext php7-ldap php7-ctype php7-dom php7-session wget mysql mysql-client php-zlib mysql mysql-client phpmyadmin vsftpd php-phar nano munin-node net-snmp
+          rc-update add apache2
+          rc-service apache2 start
+          mysql_install_db --user=mysql --datadir=/var/lib/mysql
+          rc-service mariadb start
+          sed -i "s|.*bind-address\s*=.*|bind-address=127.0.0.1|g" /etc/my.cnf.d/mariadb-server.cnf
+          rc-update add mariadb
+          rc-service mariadb restart
+          printf "{{ securepass }}\n n\n n\n n\n y\n y\n y\n" | mysql_secure_installation
+          chown -R apache:apache /etc/phpmyadmin/
+          chown -R apache:apache /usr/share/webapps/
+          ln -s /usr/share/webapps/phpmyadmin/ /var/www/localhost/htdocs/phpmyadmin
+          rc-service apache2 restart
+          sed -i "s|.*anonymous_enable\s*=.*|anonymous_enable=NO|g" /etc/vsftpd/vsftpd.conf
+          sed -i "s|.*local_enable\s*=.*|local_enable=YES|g" /etc/vsftpd/vsftpd.conf
+          sed -i "s|.*local_umask\s*=.*|local_umask=022|g" /etc/vsftpd/vsftpd.conf
+          sed -i "s|.*write_enable\s*=.*|write_enable=YES|g" /etc/vsftpd/vsftpd.conf
+          sed -i "s|.*ftpd_banner\s*=.*|ftpd_banner=Bienvenu sur notre serveur|g" /etc/vsftpd/vsftpd.conf
+          sed -i "s|.*connect_from_port_20\s*=.*|connect_from_port_20=NO|g" /etc/vsftpd/vsftpd.conf
+          echo "seccomp_sandbox=NO" >> /etc/vsftpd/vsftpd.conf && echo "pasv_enable=NO" >> /etc/vsftpd/vsftpd.conf
+          rc-service vsftpd start
+          rc-update add vsftpd
+          mysql -uroot -e "CREATE DATABASE secret_db_wordpress;"
+          mysql -u root -e "GRANT ALL PRIVILEGES ON secret_db_wordpress.* TO 'wordpress'@'localhost' IDENTIFIED BY '"{{ wordpressdbpass }}"';"
+          mysql -u root -e "FLUSH PRIVILEGES;"
+          cd /tmp
+          wget https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+          chmod +x wp-cli.phar
+          php wp-cli.phar --info
+          mv wp-cli.phar /usr/local/bin/wp
+          # Création de la BDD pour Wordpress
+          sed -i 's/disable_functions =.*/disable_functions =/g' /etc/php7/php.ini
+          # Installation de Wordpress
+          mkdir /usr/share/webapps/wordpress && cd /usr/share/webapps/wordpress
+          wp core download --allow-root
+          wp core config --dbname="secret_db_wordpress" --dbuser="wordpress" --dbpass="{{ wordpressdbpass }}" --dbhost="localhost" --dbprefix="miniwiki_wp_" --allow-root
+          wp core install --url="10.0.20.3/wordpress" --title="MiniWiki" --admin_user="{{ adminuserWP }}" --admin_password="{{ adminpassWP }}" --admin_email="{{ adminmailWP }}" --allow-root
+          chown -R apache:apache /usr/share/webapps/
+          ln -s /usr/share/webapps/wordpress/ /var/www/localhost/htdocs/wordpress
+          rm /etc/apache2/conf.d/rewrite-wordpress-url.conf
+          echo -e "<Directory "/var/www/localhost/htdocs">\nRewriteEngine on\nRewriteCond %{REQUEST_URI} !^/wordpress\nRewriteRule (.*) /wordpress/$1 [QSA,L]\n</Directory>" >> /etc/apache2/conf.d/rewrite-wordpress-url.conf
+          sed -i 's/ServerTokens OS/ServerTokens Prod/g' /etc/apache2/httpd.conf
+          sed -i 's/ServerSignature On/ServerSignature Off/g' /etc/apache2/httpd.conf
+          sed -i 's/disable_functions =.*/disable_functions = show_source, system, shell_exec, passthru, phpinfo, proc_open, proc_nice/g' /etc/php7/php.ini 
+          sed -i 's/display_errors = On/display_errors = Off/g' /etc/php7/php.ini 
+          sed -i "s|.*expose_php\s*=.*|expose_php = Off|g" /etc/php7/php.ini 
+          rm /etc/apache2/conf.d/anti-ddos.conf
+          echo -e "MaxClients 150\nKeepAlive On\nMaxKeepAliveRequests 100\nKeepAliveTimeout 10\n" >> /etc/apache2/conf.d/anti-ddos.conf
+          sed -i '/.*Require all denied/a \    Order Allow,Deny\n    Allow from all\n    Options -Indexes -ExecCGI -Includes' httpd.conf 
+          echo "allow ^10\.0\.10\.1$">>/etc/munin/munin-node.conf
+          sed -i 's|#LoadModule rewrite_module modules/mod_rewrite.so|LoadModule rewrite_module modules/mod_rewrite.so|g' /etc/apache2/httpd.conf
+          ln -sf /usr/lib/munin/plugins/cpu /etc/munin/plugins/cpu
+          ln -sf /usr/lib/munin/plugins/diskstats /etc/munin/plugins/diskstats
+          ln -sf /usr/lib/munin/plugins/fw_packets /etc/munin/plugins/fw_packets
+          ln -sf /usr/lib/munin/plugins/if_err_ /etc/munin/plugins/if_err_eth0
+          ln -sf /usr/lib/munin/plugins/if_ /etc/munin/plugins/if_eth0
+          ln -sf /usr/lib/munin/plugins/load /etc/munin/plugins/load
+          ln -sf /usr/lib/munin/plugins/memory /etc/munin/plugins/memory
+          ln -sf /usr/lib/munin/plugins/munin_stats /etc/munin/plugins/munin_stats
+          ln -sf /usr/lib/munin/plugins/processes /etc/munin/plugins/processes
+          ln -sf /usr/lib/munin/plugins/uptime /etc/munin/plugins/uptime
+          ln -sf /usr/lib/munin/plugins/users /etc/munin/plugins/users
+          ln -sf /usr/lib/munin/plugins/threads /etc/munin/plugins/threads
+          ln -sf /usr/lib/munin/plugins/swap /etc/munin/plugins/swap
+          rc-update add munin-node
+          rc-service munin-node start
+          rc-service apache2 restart
+
+    - name: Create MOTD banner file
+      blockinfile:
+        path: /etc/MOTD.laboppl
+        state: present
+        create: yes
+        block: |
+         ################################################################
+         #          PROJET LINUX AVANCE - Authorized user only          #
+         #               all your actions are recorded                  #
+         ################################################################ 
+
+    - name: Deploy SSH Key of the user that must exist on both the target and the ansible orchestrator
+      authorized_key:
+        user: ansible
+        key: "{{ lookup('file', ''{{ path_to_pub_key }}'') }}"
+        state: present
+
+
+    - name: Configure sshd for MOTD banner and public key only
+      replace:
+       path: /etc/ssh/sshd_config
+       regexp: '^(.*)(Banner)(.*)$'
+       replace: 'Banner /etc/MOTD.laboppl'
+       backup: yes
+
+    - name: Disable Password Authentication
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^PasswordAuthentication'
+        line: "PasswordAuthentication no"
+        state: present
+        backup: yes
+
+    - name: Reload daemons after modifications
+      systemd:
+        daemon_reload: yes
+
+    - name: Enable and start our newly created iptables service
+      service:
+        name: iptables-fw
+        enabled: yes
+        state: restarted
+
+    - name: Restart sshd
+      systemd:
+       name: sshd
+       state: reloaded
+
+...

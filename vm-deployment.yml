@@ -1,0 +1,54 @@
+---
+- hosts: localhost
+  gather_facts: no
+
+  vars_prompt:
+
+  - name: vm_name
+    prompt: Enter the VM name, use the naming convention
+    private: no
+
+  - name: vm_hostname
+    prompt: Enter the the hostname for the VM
+    private: no
+
+  - name: port_group
+    prompt: Please specify the port group (either VLAN 10 - Secure LAN or VLAN 20 - DMZ)
+    private: no
+    confirm: yes
+
+  - name: vm_ip
+    prompt: Enter the IP address for the VM
+    private: no
+    confirm: yes
+
+  - name: gateway
+    prompt: Please specify the gateway according to the specified port group
+    private: no
+
+
+
+  tasks:
+  - name: Clone the template
+    vmware_guest:
+      hostname: "192.168.1.3"
+      username: "{{ vcenter_username }}"
+      password: "{{ vcenter_password }}"
+      validate_certs: False
+      name: "{{ vm_name }}"
+      template: ubuntu18
+      datacenter: "ESXi laboppl"
+      folder: /
+      datastore: "laboppl1"
+      networks:
+      - name: "{{ port_group }}"
+        ip: 10.0.20.111
+        netmask: 255.255.255.0
+        gateway: "{{ gateway }}"
+        type: static
+        dns_servers: 10.0.10.1
+      customization:
+        hostname: "{{ vm_hostname }}"
+      state: poweredon
+      wait_for_ip_address: yes
+    delegate_to: localhost
