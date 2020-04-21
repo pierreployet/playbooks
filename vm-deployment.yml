@@ -42,7 +42,7 @@
       datastore: "laboppl1"
       networks:
       - name: "{{ port_group }}"
-        ip: 10.0.20.111
+        ip: "{{ vm_ip }}"
         netmask: 255.255.255.0
         gateway: "{{ gateway }}"
         type: static
