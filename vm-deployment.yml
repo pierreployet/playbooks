@@ -4,23 +4,26 @@
 
   vars_prompt:
 
-  - name: vm_name
-    prompt: Enter the VM name, use the naming convention
+  - name: vcenter_username
+    prompt: Enter the vcenter username
     private: no
 
-  - name: vm_hostname
-    prompt: Enter the the hostname for the VM
+  - name: vcenter_password
+    prompt: Enter the vcenter password
+    private: yes
+    confirm: yes
+
+  - name: vm_name
+    prompt: Enter the VM name, use the naming convention
     private: no
 
   - name: port_group
     prompt: Please specify the port group (either VLAN 10 - Secure LAN or VLAN 20 - DMZ)
     private: no
-    confirm: yes
 
   - name: vm_ip
     prompt: Enter the IP address for the VM
     private: no
-    confirm: yes
 
   - name: gateway
     prompt: Please specify the gateway according to the specified port group
@@ -29,6 +32,12 @@
 
 
   tasks:
+
+  - set_fact: 
+      vm_name: "{{ vm_name }}"
+  - set_fact:
+      vm_ip: "{{ vm_ip }}"
+
   - name: Clone the template
     vmware_guest:
       hostname: "192.168.1.3"
@@ -49,7 +58,85 @@
         dns_servers: 10.0.10.1
         mac: "{{ '00:50:06' | random_mac }}"
       customization:
-        hostname: "{{ vm_hostname }}"
+        hostname: "{{ vm_name | regex_search('^[^\\s]+') }}"
       state: poweredon
       wait_for_ip_address: yes
     delegate_to: localhost
+
+  - name: add to /etc/hosts file
+    blockinfile:
+      dest: /etc/hosts
+      state: present
+      insertafter: "[linux-servers]"
+      block: |
+        #"{{ vm_name }}"
+        "{{ vm_ip }}"
+    delegate_to: localhost
+
+
+  - name: accept new ssh fingerprints
+    shell: ssh-keyscan "{{ vm_ip }}" >> /home/ansible/.ssh/known_hosts
+    delegate_to: localhost
+
+
+- hosts: "{{ hostvars['localhost']['vm_ip'] }}"
+  ansible_user: "{{ default_user }}"
+  ansible_password: "{{ default_password }}"
+  become: yes
+  become_method: sudo
+
+  tasks:
+
+    - name: Add group "ansible" to remote server
+      group:
+        name: ansible
+        state: present
+
+    - name: Add user "ansible" to remote server
+      user:
+        name: ansible
+        password: "{{ ansible_userpass | password_hash('sha512') }}"
+        group: ansible
+        shell: /bin/bash
+        state: present
+        ssh_key_bits: 2048
+        ssh_key_file: .ssh/id_rsa
+
+    - name: Deploy SSH Key
+      authorized_key:
+        user: ansible
+        key: "{{ lookup('file', '/home/ansible/.ssh/id_rsa.pub') }}"
+        state: present
+
+
+    - name: Add ansible user to the sudoers
+      lineinfile:
+        path: /etc/sudoers.d/ansible
+        line: 'ansible ALL=(ALL) NOPASSWD: ALL'
+        state: present
+        mode: 0440
+        create: yes
+
+
+
+
+- hosts: "10.0.10.3"
+  become: yes
+  become_method: sudo
+
+  tasks:
+
+   - name: Add the conf for the new host to the supervision server
+     blockinfile:
+       path: /etc/icinga2/conf.d/linux_hosts.conf
+       state: present
+       block: |
+        object Host "{{ hostvars['localhost']['vm_name'] }}" {
+         import "generic-host"
+         address = "{{ hostvars['localhost']['vm_ip'] }}"
+         vars.os = "Linux"
+        }
+   - name: Reload icinga2 service
+     systemd:
+       name: icinga2
+       state: restarted
