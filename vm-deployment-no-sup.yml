@@ -63,41 +63,4 @@
       wait_for_ip_address: yes
     delegate_to: localhost
 
-  - name: add to /etc/ansible/hosts file
-    blockinfile:
-      path: /etc/ansible/hosts
-      state: present
-      insertafter: "[linux-servers]"
-      marker: ""
-      block: |
-        #{{ vm_name }}
-        {{ vm_ip }}
-    delegate_to: localhost
-
-  - name: accept new ssh fingerprints
-    shell: ssh-keyscan "{{ vm_ip }}" >> /home/ansible/.ssh/known_hosts
-    delegate_to: localhost
-
-
-- hosts: "10.0.10.3"
-  become: yes
-  become_method: sudo
-
-  tasks:
-
-   - name: Add the conf for the new host to the supervision server
-     blockinfile:
-       path: /etc/icinga2/conf.d/linux_hosts.conf
-       state: present
-       block: |
-        object Host "{{ hostvars['localhost']['vm_name'] }}" {
-         import "generic-host"
-         address = "{{ hostvars['localhost']['vm_ip'] }}"
-         vars.os = "Linux"
-        }
-
-   - name: Reload icinga2 service
-     systemd:
-       name: icinga2
-       state: restarted
 

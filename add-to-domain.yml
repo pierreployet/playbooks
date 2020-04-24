@@ -1,0 +1,57 @@
+---
+ - hosts: linux-servers
+   become: yes
+   become_method: sudo
+
+
+   tasks:
+    - name: Install needed packages
+      apt:
+        name: realmd,sssd-tools,sssd,libnss-sss,libpam-sss,adcli
+        state: present
+
+    - name: Add sudoers ad group to the sudoers
+      lineinfile:
+        path: /etc/sudoers
+        line: '%sudoers ALL=(ALL:ALL) ALL'
+        state: present
+        mode: '0440'
+
+    - name: Add host to domain
+      shell: echo "{{ password }}" | realm join --user=pployet --computer-ou=OU=servers,DC=LABOPPL,DC=HOME laboppl.home --install=/
+      ignore_errors: yes
+
+    - name: Edit pam for home directory auto creation when a domain user logon for the first time
+      lineinfile:
+        path: /etc/pam.d/common-session
+        state: present
+        regexp: '^# end of.*$'
+        line: session optional pam_mkhomedir.so skel=/etc/skel umask=077
+
+
+    - name: Edit sssd config file
+      lineinfile:
+        path: /etc/sssd/sssd.conf
+        state: present
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      with_items:
+        - { regexp: ^realmd_tags = manages-system joined-with-adcli$, line: realmd_tags = manages-system joined-with-samba }
+        - { regexp: ^use_fully_quallified_names = False$, line: use_fully_qualified_names = False }
+        - { regexp: ^fallback_homedir = /home/%u@%d$, line: fallback_homedir = /home/%u }
+        - { regexp: ^access_provide = ad$, line: access_provider = simple }
+
+
+    - name: Change sssd config file permissions
+      file: 
+        path: /etc/sssd/sssd.conf
+        mode: '0600'
+
+
+    - name: Restart sssd service
+      systemd:
+        name: sssd
+        state: restarted
+
+
+...
