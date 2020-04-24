@@ -46,7 +46,7 @@
       name: "{{ vm_name }}"
       template: ubuntu18
       datacenter: "ESXi laboppl"
-      folder: /"{{ port_group }}"
+      folder: /{{ port_group }}
       datastore: "laboppl1"
       networks:
       - name: "{{ port_group }}"
@@ -76,6 +76,40 @@
   - name: accept new ssh fingerprints
     shell: ssh-keyscan "{{ vm_ip }}" >> /home/ansible/.ssh/known_hosts
     delegate_to: localhost
+
+- hosts: "{{ hostvars['localhost']['vm_ip'] }}"
+  become: yes
+  become_method: sudo
+
+  tasks:
+
+    - name: Join host to the domain
+      shell: echo "{{ password }}" | realm join --user=pployet --computer-ou=OU=servers,DC=LABOPPL,DC=HOME laboppl.home --install=/
+      ignore_errors: yes
+
+    - name: Edit sssd config file
+      lineinfile:
+        path: /etc/sssd/sssd.conf
+        state: present
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      with_items:
+        - { regexp: ^realmd_tags = manages-system joined-with-adcli$, line: realmd_tags = manages-system joined-with-samba }
+        - { regexp: ^use_fully_quallified_names = False$, line: use_fully_qualified_names = False }
+        - { regexp: ^fallback_homedir = /home/%u@%d$, line: fallback_homedir = /home/%u }
+        - { regexp: ^access_provide = ad$, line: access_provider = simple }
+
+
+    - name: Change sssd config file permissions
+      file:
+        path: /etc/sssd/sssd.conf
+        mode: '0600'
+
+
+    - name: Restart sssd service
+      systemd:
+        name: sssd
+        state: restarted
 
 
 - hosts: "10.0.10.3"
