@@ -67,7 +67,6 @@
     blockinfile:
       path: /etc/ansible/hosts
       state: present
-      insertafter: "[linux-servers]"
       marker: ""
       block: |
         #{{ vm_name }}
