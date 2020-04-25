@@ -63,6 +63,11 @@
       wait_for_ip_address: yes
     delegate_to: localhost
 
+  - name: sleep for 60 seconds and continue with play
+    wait_for:
+      timeout: 60
+    delegate_to: localhost
+
   - name: add to /etc/ansible/hosts file
     blockinfile:
       path: /etc/ansible/hosts
