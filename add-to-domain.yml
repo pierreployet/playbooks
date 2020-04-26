@@ -3,6 +3,16 @@
    become: yes
    become_method: sudo
 
+   vars:
+     user: mon_user_du_domaine
+     domain: laboppl.home
+     OU: OU=servers,DC=laboppl,DC=home
+
+#   vars_prompt:
+#     - name: password
+#       prompt: "Enter the password associated with account {{ user }}"
+#       private: yes
+#       confirm: yes
 
    tasks:
     - name: Install needed packages
@@ -18,7 +28,8 @@
         mode: '0440'
 
     - name: Add host to domain
-      shell: echo "{{ password }}" | realm join --user=pployet --computer-ou=OU=servers,DC=LABOPPL,DC=HOME laboppl.home --install=/
+      shell: echo "{{ password }}" | realm join --user="{{ user }}" --computer-ou="{{ OU }}" "{{ domain }}" --install=/
+      no_log: true
       ignore_errors: yes
 
     - name: Edit pam for home directory auto creation when a domain user logon for the first time
@@ -27,7 +38,6 @@
         state: present
         regexp: '^# end of.*$'
         line: session optional pam_mkhomedir.so skel=/etc/skel umask=077
-
 
     - name: Edit sssd config file
       lineinfile:
@@ -40,18 +50,15 @@
         - { regexp: ^use_fully_quallified_names = False$, line: use_fully_qualified_names = False }
         - { regexp: ^fallback_homedir = /home/%u@%d$, line: fallback_homedir = /home/%u }
         - { regexp: ^access_provide = ad$, line: access_provider = simple }
-
+      register: sssd_conf
 
     - name: Change sssd config file permissions
-      file: 
+      file:
         path: /etc/sssd/sssd.conf
         mode: '0600'
-
 
     - name: Restart sssd service
       systemd:
         name: sssd
         state: restarted
-
-
-...
+      when: sssd_conf.changed
