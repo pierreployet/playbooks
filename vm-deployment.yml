@@ -19,6 +19,7 @@
   - name: port_group
     prompt: Please specify the port group (either VLAN 10 - Secure LAN or VLAN 20 - DMZ)
     private: no
+    default: VLAN 10 - Secure LAN
 
   - name: vm_ip
     prompt: Enter the IP address for the VM
@@ -97,7 +98,7 @@
         - { regexp: ^use_fully_quallified_names = False$, line: use_fully_qualified_names = False }
         - { regexp: ^fallback_homedir = /home/%u@%d$, line: fallback_homedir = /home/%u }
         - { regexp: ^access_provide = ad$, line: access_provider = simple }
-
+      register: sssd_config
 
     - name: Change sssd config file permissions
       file:
@@ -109,7 +110,7 @@
       systemd:
         name: sssd
         state: restarted
-
+      when: sssd_config.changed
 
 - hosts: "10.0.10.3"
   become: yes
