@@ -31,6 +31,7 @@
       shell: echo "{{ password }}" | realm join --user="{{ user }}" --computer-ou="{{ OU }}" "{{ domain }}" --install=/
       no_log: true
       ignore_errors: yes
+      register: add_to_domain
 
     - name: Edit pam for home directory auto creation when a domain user logon for the first time
       lineinfile:
@@ -51,6 +52,7 @@
         - { regexp: ^fallback_homedir = /home/%u@%d$, line: fallback_homedir = /home/%u }
         - { regexp: ^access_provide = ad$, line: access_provider = simple }
       register: sssd_conf
+      when: add_to_domain.success
 
     - name: Change sssd config file permissions
       file:
